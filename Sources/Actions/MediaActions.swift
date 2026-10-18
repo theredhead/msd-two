@@ -1,11 +1,14 @@
 import AppKit
 
-enum MediaKey: String, CaseIterable {
+/// Track controls for whichever app is playing media.
+enum MediaKey: String, CaseIterable, EventPostingAction {
   case previousTrack = "Previous track"
   case playPause = "Play/pause"
   case nextTrack = "Next track"
 
-  var symbol: String {
+  var name: String { rawValue }
+
+  var symbol: String? {
     switch self {
     case .previousTrack: return "backward.end.fill"
     case .playPause: return "playpause.fill"
@@ -28,6 +31,21 @@ enum MediaKey: String, CaseIterable {
   func sendToNowPlaying() -> Bool {
     guard let send = MediaRemote.sendCommand else { return false }
     return send(mediaRemoteCommand, nil)
+  }
+
+  func summary(in context: ActionContext) -> String? {
+    "Controls whichever app is currently playing media, like the Control Center player."
+  }
+
+  /// Falls back to media-key events, which need Accessibility, only if MediaRemote is unavailable.
+  func perform(_ binding: Binding, in context: ActionContext) {
+    if sendToNowPlaying() {
+      context.report("")
+      return
+    }
+    do {
+      post(try events(), in: context)
+    } catch { context.report(error.localizedDescription) }
   }
 
   private var keyCode: Int {
