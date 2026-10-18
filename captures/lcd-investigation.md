@@ -1,5 +1,7 @@
 # LCD key investigation
 
+> **Historical log.** Sections are recorded in the order they were discovered and are not updated afterwards. Current state: all six LCD keys (codes 1–6) are hardware-verified, key artwork is uploaded as 64×64 JPEG tiles, and the background as a 240×320 RGB565 bitmap. See the project README for current behavior.
+
 ## Observed on MSD-TWO (0B00:1001)
 
 All six LCD key presses toggle the entire display and produce no vendor input reports in current mode. Dials and circular buttons work.
@@ -10,7 +12,7 @@ Runtime output probes used 1024-byte output reports, report ID 0:
 - `CRT` at 0–2; `DIS` at 5–7: writes succeed and user confirms display turns on; next LCD press turns it off.
 - `CRT` at 0–2; `MOD` at 5–7; mode byte at offset 10: both ASCII `3` (0x33) and ASCII `2` (0x32), followed by wake and heartbeat, fail to enable LCD key events.
 
-A successful USB write is not a device acknowledgement. No key mapping has been verified for LCD keys.
+A successful USB write is not a device acknowledgement. No key mapping has been verified for LCD keys. *(Superseded: see Hardware verification after image upload.)*
 
 ## Static evidence
 
@@ -35,7 +37,7 @@ Sources:
 
 ## Hardware verification after image upload
 
-User confirmed all six LCD keys report presses after image upload/commit. Numbered 60-pixel images appeared in the correct order. The app initially failed to render its bitmaps (3-channel bitmap context); changed to 4-channel RGBA and checked encoded dimensions.
+User confirmed all six LCD keys report presses after image upload/commit. Numbered 60-pixel images appeared in the correct order (tiles were later changed to 64×64; see Tile calibration). The app initially failed to render its bitmaps (3-channel bitmap context); changed to 4-channel RGBA and checked encoded dimensions.
 
 Shared background: JPEG LOG uploads did not replace the wallpaper. The SDK's setBackgroundBitmap specifies LOG with a 32-bit big-endian length and target 1; N3 uses raw RGB16. A 240×320 RGB565 zero bitmap produced a black shared background. A 500 ms settling interval before uploading key images allowed background and key artwork to appear together. This interval is currently empirical, not an acknowledged completion protocol. Non-black background orientation and RGB565 byte order still need hardware verification.
 

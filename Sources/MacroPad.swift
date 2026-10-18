@@ -13,7 +13,15 @@ struct Binding: Codable, Identifiable {
   var argument = ""
   var keyCode: UInt16 = 0
   var modifiers: UInt64 = 0
+  /// Display label of the recorded shortcut; nil until one is recorded, since key code 0 is A.
+  var recordedShortcut: String?
   var imagePath: String?
+
+  /// Earlier versions stored the shortcut label in `argument`.
+  mutating func migrateRecordedShortcut() {
+    guard recordedShortcut == nil, action == "Keystroke", !argument.isEmpty else { return }
+    recordedShortcut = argument
+  }
 }
 
 struct MacroPadScene: Codable, Identifiable {
@@ -23,6 +31,10 @@ struct MacroPadScene: Codable, Identifiable {
 }
 
 private struct SavedConfiguration: Codable {
+  /// Version 2 introduced `Binding.recordedShortcut`; earlier files have no version.
+  static let currentVersion = 2
+
+  var version: Int?
   var bindings: [Binding]
   var scenes: [MacroPadScene]
   var activeSceneID: UUID
@@ -60,71 +72,115 @@ final class Model: ObservableObject {
   private var display: LCDSession?
   private var monitor: Any?
   private var manager: IOHIDManager!
-  private var buffers: [UnsafeMutablePointer<UInt8>] = []
+  private var displayDevice: IOHIDDevice?
+  private var inputBuffers: [ObjectIdentifier: (buffer: UnsafeMutablePointer<UInt8>, size: Int)] =
+    [:]
+  private var renderedKeys: [String: [UInt8]] = [:]
+  private var renderedBackgrounds: [String: [UInt8]] = [:]
+  private var displayRefreshScheduled = false
   private let queue = DispatchQueue(label: "MacroPad.actions")
   private let configURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
     "Library/Application Support/MacroPad/bindings.json")
 
+  private(set) var configurationRecoveries: [ConfigurationRecovery] = []
+
+  /// Unreadable files that couldn't be backed up are never overwritten.
+  private var protectedURLs: Set<URL> {
+    Set(configurationRecoveries.filter { $0.backupURL == nil }.map(\.originalURL))
+  }
+
   var activeSceneIndex: Int {
     scenes.firstIndex { $0.id == activeSceneID } ?? 0
+  }
+
+  private enum LoadedConfiguration {
+    case current(SavedConfiguration)
+    case legacy([Binding])
+  }
+
+  private static func decodeConfiguration(_ data: Data) throws -> LoadedConfiguration {
+    do {
+      return .current(try JSONDecoder().decode(SavedConfiguration.self, from: data))
+    } catch {
+      if let legacy = try? JSONDecoder().decode([Binding].self, from: data) {
+        return .legacy(legacy)
+      }
+      throw error
+    }
   }
 
   init() {
     let defaults = Self.defaultBindings()
     let defaultKeys = defaults.filter { (1...6).contains($0.id) }
     let defaultControls = defaults.filter { !(1...6).contains($0.id) }
-    var needsMigration = false
+    var needsSave = false
+    var migratesShortcuts = false
 
-    if let data = try? Data(contentsOf: configURL),
-      let saved = try? JSONDecoder().decode(SavedConfiguration.self, from: data)
-    {
+    bindings = defaultControls
+    scenes = [MacroPadScene(id: UUID(), keys: defaultKeys)]
+    activeSceneID = scenes[0].id
+
+    switch ConfigurationFile.load(configURL, decode: Self.decodeConfiguration) {
+    case .missing:
+      break
+    case .loaded(.current(let saved)):
       bindings = Self.merging(saved.bindings, into: defaultControls)
-      scenes = saved.scenes.map { scene in
+      let loadedScenes = saved.scenes.map { scene in
         MacroPadScene(
           id: scene.id,
           keys: Self.merging(scene.keys, into: defaultKeys),
           backgroundPath: scene.backgroundPath)
       }
-      if scenes.isEmpty {
-        scenes = [MacroPadScene(id: UUID(), keys: defaultKeys)]
+      if !loadedScenes.isEmpty {
+        scenes = loadedScenes
+        activeSceneID =
+          scenes.contains { $0.id == saved.activeSceneID }
+          ? saved.activeSceneID : scenes[0].id
       }
-      activeSceneID =
-        scenes.contains { $0.id == saved.activeSceneID }
-        ? saved.activeSceneID : scenes[0].id
-    } else if let data = try? Data(contentsOf: configURL),
-      let saved = try? JSONDecoder().decode([Binding].self, from: data)
-    {
+      migratesShortcuts = (saved.version ?? 1) < 2
+    case .loaded(.legacy(let saved)):
       bindings = Self.merging(
         saved.filter { !(1...6).contains($0.id) }, into: defaultControls)
-      scenes = [
-        MacroPadScene(
-          id: UUID(),
-          keys: Self.merging(saved.filter { (1...6).contains($0.id) }, into: defaultKeys))
-      ]
-      activeSceneID = scenes[0].id
-      needsMigration = true
-    } else {
-      bindings = defaultControls
-      scenes = [MacroPadScene(id: UUID(), keys: defaultKeys)]
-      activeSceneID = scenes[0].id
+      scenes[0].keys = Self.merging(
+        saved.filter { (1...6).contains($0.id) }, into: defaultKeys)
+      migratesShortcuts = true
+      needsSave = true
+    case .malformed(let recovery):
+      configurationRecoveries.append(recovery)
+      needsSave = true
     }
 
-    if scenes.isEmpty {
-      scenes = [MacroPadScene(id: UUID(), keys: defaultKeys)]
-      activeSceneID = scenes[0].id
-    }
-
-    if let data = try? Data(contentsOf: appearanceURL),
-      let settings = try? JSONDecoder().decode([String: String].self, from: data)
+    switch ConfigurationFile.load(
+      appearanceURL, decode: { try JSONDecoder().decode([String: String].self, from: $0) })
     {
+    case .missing:
+      break
+    case .loaded(let settings):
       if let legacyBackground = settings["background"], scenes[0].backgroundPath == nil {
         scenes[0].backgroundPath = legacyBackground
-        needsMigration = true
+        needsSave = true
       }
       padFollowMac = settings["followMacBrightness"] == "true"
       displayBrightness = min(100, max(0, Int(settings["brightness"] ?? "80") ?? 80))
+    case .malformed(let recovery):
+      configurationRecoveries.append(recovery)
+      needsSave = true
     }
-    if needsMigration {
+
+    // Runs once: afterwards the saved version marks unrecorded shortcuts as explicit.
+    if migratesShortcuts {
+      for index in bindings.indices {
+        bindings[index].migrateRecordedShortcut()
+      }
+      for sceneIndex in scenes.indices {
+        for keyIndex in scenes[sceneIndex].keys.indices {
+          scenes[sceneIndex].keys[keyIndex].migrateRecordedShortcut()
+        }
+      }
+      needsSave = true
+    }
+
+    if needsSave {
       save()
     }
     monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -140,11 +196,11 @@ final class Model: ObservableObject {
       {
         self.scenes[self.activeSceneIndex].keys[i].keyCode = event.keyCode
         self.scenes[self.activeSceneIndex].keys[i].modifiers = modifiers
-        self.scenes[self.activeSceneIndex].keys[i].argument = self.shortcutLabel(event)
+        self.scenes[self.activeSceneIndex].keys[i].recordedShortcut = self.shortcutLabel(event)
       } else if let i = self.bindings.firstIndex(where: { $0.id == id }) {
         self.bindings[i].keyCode = event.keyCode
         self.bindings[i].modifiers = modifiers
-        self.bindings[i].argument = self.shortcutLabel(event)
+        self.bindings[i].recordedShortcut = self.shortcutLabel(event)
       } else {
         self.recording = nil
         self.message = "The control being recorded no longer exists"
@@ -196,11 +252,18 @@ final class Model: ObservableObject {
     do {
       try FileManager.default.createDirectory(
         at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-      let configuration = SavedConfiguration(
-        bindings: bindings, scenes: scenes, activeSceneID: activeSceneID)
-      try JSONEncoder().encode(configuration).write(to: configURL, options: .atomic)
+      if !protectedURLs.contains(configURL) {
+        let configuration = SavedConfiguration(
+          version: SavedConfiguration.currentVersion, bindings: bindings, scenes: scenes,
+          activeSceneID: activeSceneID)
+        try JSONEncoder().encode(configuration).write(to: configURL, options: .atomic)
+      }
       try saveAppearance()
       refreshDisplay()
+      if !protectedURLs.isEmpty {
+        message =
+          "Changes aren't being saved: fix or move the unreadable configuration file, then restart MacroPad"
+      }
     } catch { message = "Could not save: \(error.localizedDescription)" }
   }
 
@@ -235,6 +298,7 @@ final class Model: ObservableObject {
   }
 
   private func saveAppearance() throws {
+    guard !protectedURLs.contains(appearanceURL) else { return }
     try FileManager.default.createDirectory(
       at: appearanceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
     let settings = [
@@ -260,6 +324,8 @@ final class Model: ObservableObject {
     case "MSD-TWO brightness down", "Mac display brightness down": symbol = "sun.min.fill"
     case "Toggle MSD-TWO adaptive brightness", "Toggle Mac automatic brightness":
       symbol = "sun.max.circle"
+    case "Next scene": symbol = "arrow.right.square.fill"
+    case "Previous scene": symbol = "arrow.left.square.fill"
     case "Keystroke": symbol = "keyboard"
     case "AppleScript", "Shell script": symbol = "terminal"
     default: return nil
@@ -268,23 +334,78 @@ final class Model: ObservableObject {
       .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.white]))
   }
 
-  func keyImages() -> [[UInt8]] {
-    let backgroundPath = scenes[activeSceneIndex].backgroundPath
-    let wallpaper = backgroundPath.flatMap { NSImage(contentsOfFile: $0) }
-    return (1...6).compactMap { id in
-      guard let b = scenes[activeSceneIndex].keys.first(where: { $0.id == id }) else { return nil }
-      return Artwork.jpeg(
-        image: keyPreview(b), width: 64, height: 64, label: b.action == "None" ? "" : nil,
-        wallpaper: wallpaper, keyIndex: id - 1)
+  /// Identifies a file's current contents cheaply so cached renders follow external edits.
+  private static func fileStamp(_ path: String?) -> String {
+    guard let path else { return "-" }
+    let date = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate]
+    return "\(path)@\((date as? Date)?.timeIntervalSinceReferenceDate ?? 0)"
+  }
+
+  /// Renders all six keys, or nothing, so a failed tile never shifts the others.
+  func keyImages() -> [[UInt8]]? {
+    let scene = scenes[activeSceneIndex]
+    let backgroundStamp = Self.fileStamp(scene.backgroundPath)
+    var wallpaper: NSImage??
+    var images: [[UInt8]] = []
+    for id in 1...6 {
+      guard let b = scene.keys.first(where: { $0.id == id }) else { return nil }
+      let source = b.action == "Open application" ? b.argument : ""
+      let key = [
+        String(id), b.action, source, Self.fileStamp(b.imagePath), backgroundStamp,
+      ].joined(separator: "\u{1F}")
+      if let cached = renderedKeys[key] {
+        images.append(cached)
+        continue
+      }
+      if wallpaper == nil {
+        wallpaper = .some(
+          scene.backgroundPath.flatMap {
+            try? ImageLoading.image(contentsOf: URL(fileURLWithPath: $0))
+          })
+      }
+      guard
+        let jpeg = Artwork.jpeg(
+          image: keyPreview(b), width: 64, height: 64, label: b.action == "None" ? "" : nil,
+          wallpaper: wallpaper ?? nil, keyIndex: id - 1)
+      else { return nil }
+      if renderedKeys.count >= 256 { renderedKeys.removeAll() }
+      renderedKeys[key] = jpeg
+      images.append(jpeg)
+    }
+    return images
+  }
+
+  func backgroundImageData() -> [UInt8]? {
+    let path = scenes[activeSceneIndex].backgroundPath
+    let key = Self.fileStamp(path)
+    if let cached = renderedBackgrounds[key] { return cached }
+    let image = path.flatMap { try? ImageLoading.image(contentsOf: URL(fileURLWithPath: $0)) }
+    let data = Artwork.backgroundRGB565(image: image)
+    guard data.count == Artwork.backgroundByteCount else { return nil }
+    if renderedBackgrounds.count >= 16 { renderedBackgrounds.removeAll() }
+    renderedBackgrounds[key] = data
+    return data
+  }
+
+  private func displayFrame() -> (images: [[UInt8]], background: [UInt8])? {
+    guard let images = keyImages(), let background = backgroundImageData() else {
+      message = "Could not render the device artwork; the display was not updated"
+      return nil
+    }
+    return (images, background)
+  }
+
+  /// Coalesces bursts of edits and scene changes into one render of the latest state.
+  func refreshDisplay() {
+    guard display != nil, !displayRefreshScheduled else { return }
+    displayRefreshScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+      guard let self else { return }
+      self.displayRefreshScheduled = false
+      guard let display = self.display, let frame = self.displayFrame() else { return }
+      display.update(images: frame.images, background: frame.background)
     }
   }
-
-  func backgroundImageData() -> [UInt8] {
-    let backgroundPath = scenes[activeSceneIndex].backgroundPath
-    return Artwork.backgroundRGB565(image: backgroundPath.flatMap { NSImage(contentsOfFile: $0) })
-  }
-
-  func refreshDisplay() { display?.update(images: keyImages(), background: backgroundImageData()) }
 
   private func storeArtwork(_ data: Data, for key: Int?, sceneID: UUID) {
     do {
@@ -352,10 +473,10 @@ final class Model: ObservableObject {
               }
               self.save()
             } else {
-              guard type?.conforms(to: .image) == true, let image = NSImage(contentsOf: url)
-              else {
+              guard type?.conforms(to: .image) == true else {
                 throw ActionError.failed("Drop an application or a supported image file")
               }
+              let image = try ImageLoading.image(contentsOf: url)
               self.applyDroppedImage(image, for: key, sceneID: sceneID)
             }
           } catch { self.message = error.localizedDescription }
@@ -378,11 +499,13 @@ final class Model: ObservableObject {
           self.message = "Could not read dropped image: \(error.localizedDescription)"
           return
         }
-        guard let data, let image = NSImage(data: data) else {
-          self.message = "The dropped image could not be decoded"
+        guard let data else {
+          self.message = "The dropped image could not be read"
           return
         }
-        self.applyDroppedImage(image, for: key, sceneID: sceneID)
+        do {
+          self.applyDroppedImage(try ImageLoading.image(data: data), for: key, sceneID: sceneID)
+        } catch { self.message = error.localizedDescription }
       }
     }
     return true
@@ -407,24 +530,31 @@ final class Model: ObservableObject {
       }
       storeArtwork(png, for: key, sceneID: sceneID)
     } else {
-      let picker = IconPicker()
-      picker.aspectRatio = aspectRatio
-      imagePicker = picker
-      picker.cropClosed = { [weak self] _ in
-        DispatchQueue.main.async { self?.imagePicker = nil }
-      }
+      let picker = makePicker(aspectRatio: aspectRatio)
       picker.showCrop(image: image) { [weak self] data in
         self?.storeArtwork(data, for: key, sceneID: sceneID)
       }
     }
   }
 
+  /// Keeps one artwork window open at a time; a replaced picker can't clear its successor.
+  private func makePicker(aspectRatio: CGFloat) -> IconPicker {
+    imagePicker?.close()
+    let picker = IconPicker()
+    picker.aspectRatio = aspectRatio
+    imagePicker = picker
+    picker.cropClosed = { [weak self, weak picker] _ in
+      DispatchQueue.main.async {
+        guard let self, let picker, self.imagePicker === picker else { return }
+        self.imagePicker = nil
+      }
+    }
+    return picker
+  }
+
   func chooseArtwork(for key: Int?, search: Bool) {
     let targetSceneID = activeSceneID
-    let picker = IconPicker()
-    picker.aspectRatio = key == nil ? 4.0 / 3.0 : 1
-    imagePicker = picker
-    picker.cropClosed = { [weak self] _ in DispatchQueue.main.async { self?.imagePicker = nil } }
+    let aspectRatio: CGFloat = key == nil ? 4.0 / 3.0 : 1
     let apply: (Data) -> Void = { [weak self] data in
       self?.storeArtwork(data, for: key, sceneID: targetSceneID)
     }
@@ -443,17 +573,16 @@ final class Model: ObservableObject {
         term =
           item.map { $0.action == "None" ? "icon" : $0.action + " icon" } ?? "abstract background"
       }
-      picker.show(searchName: term, completion: apply)
+      makePicker(aspectRatio: aspectRatio).show(searchName: term, completion: apply)
     } else {
       let panel = NSOpenPanel()
       panel.allowedContentTypes = [.image]
       panel.canChooseDirectories = false
-      guard panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url)
-      else {
-        imagePicker = nil
-        return
-      }
-      picker.showCrop(image: image, completion: apply)
+      guard panel.runModal() == .OK, let url = panel.url else { return }
+      do {
+        let image = try ImageLoading.image(contentsOf: url)
+        makePicker(aspectRatio: aspectRatio).showCrop(image: image, completion: apply)
+      } catch { message = error.localizedDescription }
     }
   }
 
@@ -473,10 +602,12 @@ final class Model: ObservableObject {
         let size = max(
           (IOHIDDeviceGetProperty(device, kIOHIDMaxInputReportSizeKey as CFString) as? NSNumber)?
             .intValue ?? 512, 512)
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: size)
-        model.buffers.append(buffer)
+        let input =
+          model.inputBuffers[ObjectIdentifier(device)]
+          ?? (UnsafeMutablePointer<UInt8>.allocate(capacity: size), size)
+        model.inputBuffers[ObjectIdentifier(device)] = input
         IOHIDDeviceRegisterInputReportCallback(
-          device, buffer, size,
+          device, input.buffer, input.size,
           { context, result, _, _, _, report, length in
             guard let context, result == kIOReturnSuccess, length >= 10 else { return }
             let model = Unmanaged<Model>.fromOpaque(context).takeUnretainedValue()
@@ -490,28 +621,44 @@ final class Model: ObservableObject {
             model.handle(Int(report[9]))
           }, context)
         model.display?.stop()
+        model.displayDevice = device
         model.display = LCDSession(device: device) { error in
           DispatchQueue.main.async { model.message = error.localizedDescription }
         }
+        let frame = model.displayFrame()
         model.display?.start(
-          images: model.keyImages(), background: model.backgroundImageData(),
+          images: frame?.images ?? [], background: frame?.background ?? [],
           brightness: model.displayBrightness)
         model.connected = true
         model.message = "CS06 / MSD-TWO connected"
       }, context)
     IOHIDManagerRegisterDeviceRemovalCallback(
       manager,
-      { context, _, _, _ in
+      { context, _, _, device in
         guard let context else { return }
         let model = Unmanaged<Model>.fromOpaque(context).takeUnretainedValue()
+        model.releaseInput(for: device, context: context)
+        guard model.displayDevice === device else { return }
         model.display?.stop()
         model.display = nil
+        model.displayDevice = nil
         model.connected = false
         model.message = "Device disconnected"
       }, context)
     IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
     let result = IOHIDManagerOpen(manager, 0)
     if result != kIOReturnSuccess { message = String(format: "HID access failed: 0x%08x", result) }
+  }
+
+  /// Stops report delivery for a removed device, then frees the buffer IOKit copied reports into.
+  private func releaseInput(for device: IOHIDDevice, context: UnsafeMutableRawPointer) {
+    guard let input = inputBuffers.removeValue(forKey: ObjectIdentifier(device)) else { return }
+    // IOKit matches registrations by context, so it must be the one used to register.
+    IOHIDDeviceRegisterInputReportCallback(device, input.buffer, input.size, nil, context)
+    IOHIDDeviceUnscheduleFromRunLoop(
+      device, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
+    // Reports are copied on the main run loop; free only after any in-flight turn completes.
+    DispatchQueue.main.async { input.buffer.deallocate() }
   }
 
   func handle(_ code: Int) {
@@ -547,6 +694,10 @@ final class Model: ObservableObject {
 
   func execute(_ b: Binding) {
     if let mediaKey = MediaKey(rawValue: b.action) {
+      if mediaKey.sendToNowPlaying() {
+        message = ""
+        return
+      }
       guard requestAccessibilityAccess() else { return }
       do {
         let events = try mediaKey.events()
@@ -615,6 +766,10 @@ final class Model: ObservableObject {
       return
     }
     if b.action == "Keystroke" {
+      guard b.recordedShortcut != nil else {
+        message = "Record a keystroke for \(b.name) first"
+        return
+      }
       guard requestAccessibilityAccess() else { return }
       guard let source = CGEventSource(stateID: .hidSystemState),
         let down = CGEvent(keyboardEventSource: source, virtualKey: b.keyCode, keyDown: true),
@@ -756,6 +911,7 @@ final class LCDSession {
   private var lastImages: [[UInt8]] = []
   private var lastBackground: [UInt8]?
   private var borderRepairGeneration = 0
+  private var pendingFrame: (images: [[UInt8]], background: [UInt8])?
 
   init(device: IOHIDDevice, failure: @escaping (Error) -> Void) {
     self.device = device
@@ -768,7 +924,6 @@ final class LCDSession {
         try self.command("DIS")
         try self.command("LIG", [0, 0, 0])
         try self.command("LIG", [0, 0, UInt8(min(100, max(0, brightness)))])
-        guard images.count == 6 else { throw ActionError.failed("Cannot render LCD key images") }
         try self.apply(images: images, background: background)
         try self.command("CONNECT")
         let timer = DispatchSource.makeTimerSource(queue: self.queue)
@@ -793,10 +948,20 @@ final class LCDSession {
     }
   }
 
+  /// Only the newest frame queued behind an in-progress transfer is written.
   func update(images: [[UInt8]], background: [UInt8]) {
     queue.async { [self] in
-      guard !stopped else { return }
-      do { try apply(images: images, background: background) } catch { failure(error) }
+      let drainScheduled = pendingFrame != nil
+      pendingFrame = (images, background)
+      guard !drainScheduled else { return }
+      queue.async { [self] in
+        guard let frame = pendingFrame else { return }
+        pendingFrame = nil
+        guard !stopped else { return }
+        do { try apply(images: frame.images, background: frame.background) } catch {
+          failure(error)
+        }
+      }
     }
   }
 
@@ -816,6 +981,9 @@ final class LCDSession {
   }
 
   private func apply(images: [[UInt8]], background: [UInt8]) throws {
+    guard images.count == 6, images.allSatisfy({ !$0.isEmpty }),
+      background.count == Artwork.backgroundByteCount
+    else { throw ActionError.failed("Cannot render LCD images; the display was not updated") }
     if background != lastBackground {
       // A background transfer clears the device's key layer, even when
       // the desired icon bytes haven't changed. Invalidate before writing
@@ -1265,7 +1433,7 @@ struct SettingsView: View {
     }
     if item.action == "Keystroke" {
       Text(
-        item.argument.isEmpty ? "No keystroke recorded" : item.argument
+        item.recordedShortcut ?? "No keystroke recorded"
       ).font(.title.monospaced()).padding(16)
       Button(model.recording == selected ? "Press keys… (Esc cancels)" : "Record keystroke") {
         model.recording = selected
@@ -1310,14 +1478,15 @@ struct SettingsView: View {
     } else if item.action == "Next scene" || item.action == "Previous scene" {
       Text("Cycles through scenes in order and wraps at either end.").foregroundStyle(.secondary)
     } else if MediaKey(rawValue: item.action) != nil {
-      Text("Sends a system media key to the current media player. Requires Accessibility access.")
+      Text("Controls whichever app is currently playing media, like the Control Center player.")
         .foregroundStyle(.secondary)
     }
     Button {
       model.execute(item)
     } label: {
       Label("Test action", systemImage: "play.fill")
-    }.disabled(item.action == "None")
+    }.disabled(
+      item.action == "None" || (item.action == "Keystroke" && item.recordedShortcut == nil))
   }
 }
 private struct ConnectionStatusView: View {
@@ -1401,6 +1570,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSTool
     window.contentMinSize = NSSize(width: 860, height: 650)
     window.center()
     showSettings()
+    if !model.configurationRecoveries.isEmpty {
+      DispatchQueue.main.async {
+        self.presentConfigurationRecoveries(self.model.configurationRecoveries[...])
+      }
+    }
+  }
+
+  private func presentConfigurationRecoveries(_ recoveries: ArraySlice<ConfigurationRecovery>) {
+    guard let recovery = recoveries.first else { return }
+    let remaining = recoveries.dropFirst()
+    let next = { DispatchQueue.main.async { self.presentConfigurationRecoveries(remaining) } }
+    let name = recovery.originalURL.lastPathComponent
+    let file = recovery.backupURL ?? recovery.originalURL
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    if let backup = recovery.backupURL {
+      alert.messageText = "MacroPad couldn't read “\(name)”"
+      alert.informativeText =
+        "The file was backed up as “\(backup.lastPathComponent)” and default settings were created in its place.\n\n\(recovery.problem)"
+    } else {
+      alert.messageText = "MacroPad couldn't read or back up “\(name)”"
+      alert.informativeText =
+        "The file was left unchanged. MacroPad is using default settings but won't save them until you fix or move the file and restart MacroPad.\n\nRead error: \(recovery.problem)\nBackup error: \(recovery.backupProblem ?? "Unknown")"
+    }
+    alert.addButton(withTitle: "OK")
+    alert.addButton(withTitle: "Save a Copy…")
+    alert.addButton(withTitle: "Show in Finder")
+    alert.beginSheetModal(for: window) { [weak self] response in
+      guard let self else { return }
+      switch response {
+      case .alertSecondButtonReturn:
+        DispatchQueue.main.async { self.saveCopy(of: file, completion: next) }
+      case .alertThirdButtonReturn:
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+        next()
+      default:
+        next()
+      }
+    }
+  }
+
+  private func saveCopy(of file: URL, completion: @escaping () -> Void) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = file.lastPathComponent
+    panel.canCreateDirectories = true
+    panel.beginSheetModal(for: window) { [weak self] response in
+      guard let self, response == .OK, let destination = panel.url else {
+        completion()
+        return
+      }
+      do {
+        try Data(contentsOf: file).write(to: destination, options: .atomic)
+        completion()
+      } catch {
+        DispatchQueue.main.async {
+          NSAlert(error: error).beginSheetModal(for: self.window) { _ in completion() }
+        }
+      }
+    }
   }
 
   @objc func showSettings() {

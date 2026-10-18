@@ -1,6 +1,76 @@
 import AppKit
+import ImageIO
+
+enum ImageLoadError: LocalizedError {
+  case tooLarge
+  case tooManyPixels
+  case unreadable
+
+  var errorDescription: String? {
+    switch self {
+    case .tooLarge: "The image file is larger than 30 MB"
+    case .tooManyPixels: "The image has more than 100 megapixels"
+    case .unreadable: "The image could not be decoded"
+    }
+  }
+}
+
+/// Decodes untrusted images within fixed byte and pixel budgets.
+enum ImageLoading {
+  static let maxBytes = 30 * 1024 * 1024
+  static let maxSourcePixels = 100_000_000
+  static let maxDimension = 4096
+
+  static func image(contentsOf url: URL) throws -> NSImage {
+    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard size <= maxBytes else { throw ImageLoadError.tooLarge }
+    return try image(data: Data(contentsOf: url, options: .mappedIfSafe))
+  }
+
+  static func validatePixels(width: Int, height: Int) throws {
+    let product = width.multipliedReportingOverflow(by: height)
+    guard !product.overflow, product.partialValue <= maxSourcePixels else {
+      throw ImageLoadError.tooManyPixels
+    }
+  }
+
+  static func image(data: Data) throws -> NSImage {
+    guard data.count <= maxBytes else { throw ImageLoadError.tooLarge }
+    let options = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithData(data as CFData, options),
+      CGImageSourceGetType(source) != nil, CGImageSourceGetCount(source) > 0
+    else {
+      // Vector formats such as PDF aren't handled by ImageIO; they rasterize at draw size.
+      guard let image = NSImage(data: data), image.size.width > 0, image.size.height > 0,
+        image.representations.allSatisfy({ !($0 is NSBitmapImageRep) })
+      else { throw ImageLoadError.unreadable }
+      return image
+    }
+    guard
+      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options)
+        as? [CFString: Any],
+      let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+      let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+      width > 0, height > 0
+    else { throw ImageLoadError.unreadable }
+    try validatePixels(width: width, height: height)
+    let thumbnailOptions =
+      [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceShouldCacheImmediately: true,
+        kCGImageSourceThumbnailMaxPixelSize: min(maxDimension, max(width, height)),
+      ] as CFDictionary
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+      throw ImageLoadError.unreadable
+    }
+    return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+  }
+}
 
 enum Artwork {
+  static let backgroundByteCount = 240 * 320 * 2
+
   static func requiresCrop(image: NSImage, aspectRatio: CGFloat) -> Bool {
     abs(image.size.width - image.size.height * aspectRatio) >= 0.01
   }

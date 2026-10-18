@@ -44,6 +44,36 @@ struct ArtworkChecks {
     print(
       "PASS all six tiles: transparent pixels retain wallpaper; half-alpha pixels blend; wire JPEG stays 64×64"
     )
+    precondition(Artwork.backgroundRGB565(image: nil).count == Artwork.backgroundByteCount)
+    precondition(Artwork.backgroundRGB565(image: wall).count == Artwork.backgroundByteCount)
 
+    let loaded = try! ImageLoading.image(data: source.representation(using: .png, properties: [:])!)
+    precondition(loaded.size == NSSize(width: 64, height: 64))
+    let wide = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: 5000, pixelsHigh: 50, bitsPerSample: 8,
+      samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+      bytesPerRow: 0, bitsPerPixel: 0)!
+    let downsampled = try! ImageLoading.image(
+      data: wide.representation(using: .png, properties: [:])!)
+    precondition(Int(downsampled.size.width) == ImageLoading.maxDimension)
+    try! ImageLoading.validatePixels(width: 10_000, height: 10_000)
+    for (width, height) in [(10_001, 10_000), (Int.max, 2)] {
+      do {
+        try ImageLoading.validatePixels(width: width, height: height)
+        preconditionFailure("Expected pixel limit for \(width)×\(height)")
+      } catch { precondition(error as? ImageLoadError == .tooManyPixels) }
+    }
+    expect(.tooLarge, Data(count: ImageLoading.maxBytes + 1))
+    expect(.unreadable, Data("not an image".utf8))
+    print("PASS image loading: decoded size, 4096-pixel downsampling, byte and pixel limits")
+  }
+
+  static func expect(_ expected: ImageLoadError, _ data: Data) {
+    do {
+      _ = try ImageLoading.image(data: data)
+      preconditionFailure("Expected \(expected)")
+    } catch let error as ImageLoadError {
+      precondition(error == expected, "Expected \(expected), got \(error)")
+    } catch { preconditionFailure("Unexpected \(error)") }
   }
 }

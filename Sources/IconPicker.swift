@@ -119,6 +119,11 @@ final class IconPicker: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
   var cropClosed: ((Bool) -> Void)?
   var aspectRatio: CGFloat = 1
   private var acceptedCrop = false
+  private var download: BoundedDownload?
+
+  func close() {
+    window?.close()
+  }
 
   /// Lets local and pasted images use the same crop controls without starting a search.
   func showCrop(image: NSImage, completion: @escaping (Data) -> Void) {
@@ -349,34 +354,44 @@ final class IconPicker: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
     }
     requestID += 1
     let selectedID = requestID
-    if value.hasPrefix("data:image"), let part = value.components(separatedBy: ",").last,
-      let data = Data(base64Encoded: part), let image = NSImage(data: data)
-    {
+    download?.cancel()
+    download = nil
+    if value.hasPrefix("data:image") {
       isAwaitingResults = false
-      crop.image = image
-      zoomSlider.doubleValue = 1
-      status.stringValue = iconPickerIntl.dragAndZoomThenUseThis
+      guard let part = value.split(separator: ",", maxSplits: 1).last,
+        part.utf8.count <= ImageLoading.maxBytes / 3 * 4 + 4,
+        let data = Data(base64Encoded: String(part)),
+        let image = try? ImageLoading.image(data: data)
+      else {
+        crop.image = nil
+        status.stringValue = iconPickerIntl.couldNotLoadThatImageTry
+        return
+      }
+      setCropImage(image)
       return
     }
     guard let url = URL(string: value), ["https", "http"].contains(url.scheme ?? "") else {
       return
     }
     isAwaitingResults = false
+    // Clear the previous selection so a stale image can't be applied while loading.
+    crop.image = nil
     status.stringValue = iconPickerIntl.loadingSelectedImage
-    URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-      DispatchQueue.main.async {
-        guard let self = self, self.requestID == selectedID else {
-          return
-        }
-        if let data = data, data.count <= 30 * 1024 * 1024, let image = NSImage(data: data) {
-          self.crop.image = image
-          self.zoomSlider.doubleValue = 1
-          self.status.stringValue = iconPickerIntl.dragAndZoomThenUseThis
-        } else {
-          self.status.stringValue = iconPickerIntl.couldNotLoadThatImageTry
-        }
+    download = BoundedDownload(url: url, limit: ImageLoading.maxBytes) { [weak self] result in
+      guard let self, self.requestID == selectedID else { return }
+      self.download = nil
+      if case .success(let data) = result, let image = try? ImageLoading.image(data: data) {
+        self.setCropImage(image)
+      } else {
+        self.status.stringValue = iconPickerIntl.couldNotLoadThatImageTry
       }
-    }.resume()
+    }
+  }
+
+  private func setCropImage(_ image: NSImage) {
+    crop.image = image
+    zoomSlider.doubleValue = 1
+    status.stringValue = iconPickerIntl.dragAndZoomThenUseThis
   }
 
   @objc private func zoomChanged(_ sender: NSSlider) {
@@ -387,14 +402,17 @@ final class IconPicker: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
     let panel = NSOpenPanel()
     panel.allowedContentTypes = [.image]
     panel.canChooseDirectories = false
-    guard panel.runModal() == .OK, let url = panel.url, let image = NSImage(contentsOf: url) else {
-      return
-    }
+    guard panel.runModal() == .OK, let url = panel.url else { return }
     requestID += 1
+    download?.cancel()
+    download = nil
     isAwaitingResults = false
-    crop.image = image
-    zoomSlider.doubleValue = 1
-    status.stringValue = iconPickerIntl.dragAndZoomThenUseThis
+    do {
+      setCropImage(try ImageLoading.image(contentsOf: url))
+    } catch {
+      crop.image = nil
+      status.stringValue = error.localizedDescription
+    }
   }
 
   @objc private func useCrop(_ sender: Any?) {
@@ -409,6 +427,8 @@ final class IconPicker: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
 
   func windowWillClose(_ notification: Notification) {
     requestID += 1
+    download?.cancel()
+    download = nil
     browser?.configuration.userContentController.removeScriptMessageHandler(forName: "iconImage")
     searchBrowser?.stopLoading()
     searchBrowser?.configuration.userContentController.removeScriptMessageHandler(
@@ -419,5 +439,73 @@ final class IconPicker: NSObject, WKScriptMessageHandler, WKNavigationDelegate, 
     let closed = cropClosed
     cropClosed = nil
     closed?(acceptedCrop)
+  }
+}
+
+/// Downloads a response into memory, cancelling as soon as it exceeds the byte limit.
+final class BoundedDownload: NSObject, URLSessionDataDelegate {
+  enum Failure: Error {
+    case tooLarge
+    case httpStatus(Int)
+  }
+
+  private let limit: Int
+  private var completion: ((Result<Data, Error>) -> Void)?
+  private var data = Data()
+  private var session: URLSession!
+
+  /// Calls completion on the main queue unless cancelled first.
+  init(url: URL, limit: Int, completion: @escaping (Result<Data, Error>) -> Void) {
+    self.limit = limit
+    self.completion = completion
+    super.init()
+    let queue = OperationQueue()
+    queue.maxConcurrentOperationCount = 1
+    session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: queue)
+    session.dataTask(with: url).resume()
+  }
+
+  /// Must be called on the main queue; no completion is delivered afterwards.
+  func cancel() {
+    completion = nil
+    session.invalidateAndCancel()
+  }
+
+  func urlSession(
+    _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+  ) {
+    if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+      finish(.failure(Failure.httpStatus(http.statusCode)))
+      completionHandler(.cancel)
+    } else if response.expectedContentLength > limit {
+      finish(.failure(Failure.tooLarge))
+      completionHandler(.cancel)
+    } else {
+      completionHandler(.allow)
+    }
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    guard self.data.count + data.count <= limit else {
+      finish(.failure(Failure.tooLarge))
+      dataTask.cancel()
+      return
+    }
+    self.data.append(data)
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    finish(error.map { .failure($0) } ?? .success(data))
+  }
+
+  /// Delivers only the first outcome and releases the session's strong delegate reference.
+  private func finish(_ result: Result<Data, Error>) {
+    session.finishTasksAndInvalidate()
+    DispatchQueue.main.async {
+      guard let completion = self.completion else { return }
+      self.completion = nil
+      completion(result)
+    }
   }
 }

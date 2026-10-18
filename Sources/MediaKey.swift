@@ -13,6 +13,23 @@ enum MediaKey: String, CaseIterable {
     }
   }
 
+  /// MRMediaRemoteCommand values: kMRTogglePlayPause, kMRNextTrack, kMRPreviousTrack.
+  var mediaRemoteCommand: UInt32 {
+    switch self {
+    case .previousTrack: return 5
+    case .playPause: return 2
+    case .nextTrack: return 4
+    }
+  }
+
+  /// Sends the command straight to the Now Playing app, as Control Center does.
+  /// Unlike posting key events, this needs no Accessibility permission.
+  /// Returns false when the private framework is unavailable, so callers can fall back to `events()`.
+  func sendToNowPlaying() -> Bool {
+    guard let send = MediaRemote.sendCommand else { return false }
+    return send(mediaRemoteCommand, nil)
+  }
+
   private var keyCode: Int {
     switch self {
     case .previousTrack: return 18
@@ -36,6 +53,19 @@ enum MediaKey: String, CaseIterable {
       return event
     }
   }
+}
+
+enum MediaRemote {
+  typealias SendCommand = @convention(c) (UInt32, CFDictionary?) -> Bool
+
+  static let sendCommand: SendCommand? = {
+    guard
+      let handle = dlopen(
+        "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY),
+      let symbol = dlsym(handle, "MRMediaRemoteSendCommand")
+    else { return nil }
+    return unsafeBitCast(symbol, to: SendCommand.self)
+  }()
 }
 
 private enum MediaKeyError: LocalizedError {

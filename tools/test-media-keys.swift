@@ -25,5 +25,11 @@ struct MediaKeyChecks {
       }
     }
     print("PASS all three media keys: system-defined key-down/key-up event encoding")
+    // Resolves the MediaRemote entry point without sending a command or touching playback.
+    precondition(MediaRemote.sendCommand != nil, "MRMediaRemoteSendCommand is unavailable")
+    precondition(MediaKey.playPause.mediaRemoteCommand == 2)
+    precondition(MediaKey.nextTrack.mediaRemoteCommand == 4)
+    precondition(MediaKey.previousTrack.mediaRemoteCommand == 5)
+    print("PASS MediaRemote: command entry point resolves; commands map to toggle/next/previous")
   }
 }
