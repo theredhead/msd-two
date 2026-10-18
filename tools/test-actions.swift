@@ -25,6 +25,36 @@ final class FakeContext: ActionContext {
 @main
 struct ActionChecks {
   static func main() {
+    // Migrating shared dial/button bindings must preserve each scene and its artwork.
+    var shared = Binding(id: 0x91, name: "Left small dial clockwise")
+    shared.action = ShellScriptAction().name
+    shared.argument = "echo preserved"
+    shared.recordedShortcut = "⌘A"
+    let first = MacroPadScene(id: UUID(), keys: [Binding(id: 1, name: "LCD key 1")], backgroundPath: "/first.png")
+    let second = MacroPadScene(id: UUID(), keys: [Binding(id: 1, name: "LCD key 1", action: "Mute")])
+    let old = SavedConfiguration(version: 2, bindings: [shared], scenes: [first, second], activeSceneID: second.id)
+    let migrated = old.migratedScenes()
+    precondition(migrated.count == 2 && migrated[0].id == first.id)
+    precondition(migrated[0].backgroundPath == "/first.png")
+    for scene in migrated {
+      precondition(scene.keys.count == DefaultConfiguration.bindings().count)
+      let dial = scene.keys.first { $0.id == shared.id }!
+      precondition(dial.argument == shared.argument && dial.recordedShortcut == shared.recordedShortcut)
+    }
+    precondition(migrated[1].keys.first { $0.id == 1 }!.action == "Mute")
+    var independent = migrated
+    independent[0].keys[6].action = "Mute"
+    let current = SavedConfiguration(version: 3, bindings: [], scenes: independent, activeSceneID: first.id)
+    let roundTrip = try! JSONDecoder().decode(SavedConfiguration.self, from: JSONEncoder().encode(current)).migratedScenes()
+    precondition(roundTrip[0].keys[6].action == "Mute")
+    precondition(roundTrip[1].keys[6].action != "Mute")
+    precondition(DialPreset.volume.actions.map(\.name) == ["Volume down", "Mute", "Volume up"])
+    precondition(DialPreset.scenes.actions.map(\.name) == ["Previous scene", "None", "Next scene"])
+    for code in [0x35, 0x33, 0x34] {
+      precondition(DialPreset.controls(for: code)?.count == 3)
+    }
+    print("PASS whole-device scene migration, persistence, independence, and dial preset ordering")
+
     // Persisted names must never change: existing bindings.json files store them.
     let expected: [(String, [String])] = [
       (

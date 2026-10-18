@@ -22,18 +22,33 @@ struct Binding: Codable, Identifiable {
 
 struct MacroPadScene: Codable, Identifiable {
   var id: UUID
+  /// Includes every device control; the persisted name remains `keys` for compatibility.
   var keys: [Binding]
   var backgroundPath: String? = nil
 }
 
 struct SavedConfiguration: Codable {
   /// Version 2 introduced `Binding.recordedShortcut`; earlier files have no version.
-  static let currentVersion = 2
+  static let currentVersion = 3
 
+  /// Version 3 stores all controls in each scene. `bindings` is retained for migration.
   var version: Int?
   var bindings: [Binding]
   var scenes: [MacroPadScene]
   var activeSceneID: UUID
+
+  func migratedScenes() -> [MacroPadScene] {
+    let defaults = DefaultConfiguration.bindings()
+    let shared = DefaultConfiguration.merging(
+      bindings, into: defaults.filter { !(1...6).contains($0.id) })
+    return scenes.map { scene in
+      var result = scene
+      result.keys = DefaultConfiguration.merging(
+        scene.keys + ((version ?? 1) < 3 ? shared : []), into: defaults)
+      return result
+    }
+  }
+
 }
 
 /// A decoded bindings.json, in either the current or the pre-scenes format.
@@ -78,5 +93,30 @@ enum DefaultConfiguration {
     defaults.map { fallback in
       saved.first { $0.id == fallback.id } ?? fallback
     }
+  }
+}
+
+/// A preset replaces all three gestures, leaving other controls untouched.
+enum DialPreset: String, CaseIterable {
+  case volume = "Volume"
+  case macBrightness = "Mac brightness"
+  case padBrightness = "Pad brightness"
+  case media = "Media"
+  case scenes = "Scenes"
+  case clear = "Clear dial"
+
+  var actions: [any MacroAction] {
+    switch self {
+    case .volume: return [VolumeAdjustment(direction: .down), MuteAction(), VolumeAdjustment(direction: .up)]
+    case .macBrightness: return [MacBrightnessAdjustment(direction: .down), ToggleMacAutomaticBrightnessAction(), MacBrightnessAdjustment(direction: .up)]
+    case .padBrightness: return [PadBrightnessAdjustment(direction: .down), TogglePadAdaptiveBrightnessAction(), PadBrightnessAdjustment(direction: .up)]
+    case .media: return [MediaKey.previousTrack, MediaKey.playPause, MediaKey.nextTrack]
+    case .scenes: return [SceneNavigationAction(direction: .previous), NoAction(), SceneNavigationAction(direction: .next)]
+    case .clear: return [NoAction(), NoAction(), NoAction()]
+    }
+  }
+
+  static func controls(for code: Int) -> [Int]? {
+    [[0x50, 0x35, 0x51], [0x90, 0x33, 0x91], [0x60, 0x34, 0x61]].first { $0.contains(code) }
   }
 }

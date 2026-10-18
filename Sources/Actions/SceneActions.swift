@@ -1,6 +1,6 @@
 import Foundation
 
-/// Switches the screen buttons to the next or previous scene, wrapping at either end.
+/// Switches the whole device to the next or previous scene, wrapping at either end.
 struct SceneNavigationAction: MacroAction {
   enum Direction {
     case next

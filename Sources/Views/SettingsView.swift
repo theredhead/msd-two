@@ -7,23 +7,29 @@ struct SettingsView: View {
   private var isScreenKey: Bool { (1...6).contains(selected) }
 
   private var index: Int? {
-    if isScreenKey {
-      return model.scenes[model.activeSceneIndex].keys.firstIndex { $0.id == selected }
-    }
-    return model.bindings.firstIndex { $0.id == selected }
+    model.scenes[model.activeSceneIndex].keys.firstIndex { $0.id == selected }
   }
 
   var body: some View {
     VStack(spacing: 0) {
       HStack(alignment: .top, spacing: 0) {
         VStack(alignment: .leading, spacing: 22) {
+          Picker(
+            "Scene",
+            selection: SwiftUI.Binding(
+              get: { model.activeSceneID }, set: { model.selectScene($0) })
+          ) {
+            ForEach(Array(model.scenes.enumerated()), id: \.element.id) { index, scene in
+              Text("Scene \(index + 1)").tag(scene.id)
+            }
+          }
           Text("YOUR DEVICE").font(.caption.weight(.semibold)).tracking(2).foregroundStyle(
             .secondary)
           DeviceView(model: model, selected: $selected)
           Label("Click a button or dial to configure it", systemImage: "cursorarrow.rays")
             .font(.callout).foregroundStyle(.secondary)
           VStack(alignment: .leading, spacing: 8) {
-            Text("Device background").font(.caption).foregroundStyle(.secondary)
+            Text("Scene background").font(.caption).foregroundStyle(.secondary)
             HStack {
               if let path = model.scenes[model.activeSceneIndex].backgroundPath,
                 let image = NSImage(contentsOfFile: path)
@@ -45,40 +51,28 @@ struct SettingsView: View {
           }
           .modifier(ControlDropTarget(model: model, key: nil))
           .help("Drop an image to set this scene's background")
+          Spacer()
           HStack {
-            Picker(
-              "Scene",
-              selection: SwiftUI.Binding(
-                get: { model.activeSceneID }, set: { model.selectScene($0) })
-            ) {
-              ForEach(Array(model.scenes.enumerated()), id: \.element.id) { index, scene in
-                Text("Scene \(index + 1)").tag(scene.id)
-              }
-            }
             Button {
               model.addScene()
             } label: {
-              Image(systemName: "plus").frame(width: 24, height: 24)
+              Label("Add scene", systemImage: "plus")
             }
             .help("Add scene")
-            .frame(width: 28, height: 28)
+            Button {
+              model.duplicateActiveScene()
+            } label: {
+              Label("Duplicate", systemImage: "plus.square.on.square")
+            }
+            .help("Duplicate current scene")
             Button {
               model.deleteActiveScene()
             } label: {
-              Image(systemName: "minus").frame(width: 24, height: 24)
+              Label("Remove scene", systemImage: "minus")
             }
             .help("Delete current scene")
             .disabled(model.scenes.count <= 1)
-            .frame(width: 28, height: 28)
           }
-          Text("Assign Next scene or Previous scene to a control to switch on the device.")
-            .font(.caption).foregroundStyle(.secondary)
-          Toggle("Refresh pressed key only (experimental)", isOn: $model.repairKeyBorders)
-            .font(.caption)
-            .help(
-              "Rewrites only the pressed key image to test whether that resets the firmware border. Release timing is approximate."
-            )
-          Spacer()
         }.padding(26).frame(width: 480)
         Divider()
         VStack(alignment: .leading, spacing: 20) {
@@ -98,9 +92,6 @@ struct SettingsView: View {
         Label("Saved automatically", systemImage: "checkmark.circle").foregroundStyle(.secondary)
       }.font(.caption).padding(16)
     }.frame(minWidth: 860, minHeight: 650)
-      .onChange(of: model.bindings.map { "\($0.action)|\($0.argument)|\($0.imagePath ?? "")" }) {
-        model.save()
-      }
       .onChange(
         of: model.scenes.map {
           "\($0.id)|"
@@ -116,9 +107,7 @@ struct SettingsView: View {
 
   @ViewBuilder private func editor(_ i: Int) -> some View {
     let binding: SwiftUI.Binding<Binding> =
-      isScreenKey
-      ? $model.scenes[model.activeSceneIndex].keys[i]
-      : $model.bindings[i]
+      $model.scenes[model.activeSceneIndex].keys[i]
     let item = binding.wrappedValue
     Text(item.name).font(.title2.weight(.semibold))
     if isScreenKey {
@@ -156,6 +145,13 @@ struct SettingsView: View {
         Text("Press").tag(group[1])
         Text("Turn right").tag(group[2])
       }.pickerStyle(.segmented)
+    }
+    if DialPreset.controls(for: selected) != nil {
+      Menu("Set entire dial…") {
+        DialPresetMenu(model: model, code: selected)
+      }
+      Text("Assigns turn left, press, and turn right together for this scene.")
+        .font(.caption).foregroundStyle(.secondary)
     }
     let action = ActionCatalog.action(named: item.action)
     VStack(alignment: .leading, spacing: 10) {

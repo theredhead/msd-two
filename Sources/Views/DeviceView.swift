@@ -65,7 +65,7 @@ struct DeviceView: View {
                   lineWidth: isSelected(code) ? 3 : 1)
               )
               .overlay(Image(systemName: "circle").foregroundStyle(.white.opacity(0.35)))
-            }.buttonStyle(.plain).help(model.bindings.first { $0.id == code }?.name ?? "Button")
+            }.buttonStyle(.plain).help(model.scenes[model.activeSceneIndex].keys.first { $0.id == code }?.name ?? "Button")
               .modifier(ControlDropTarget(model: model, key: code))
           }
         }.frame(width: 194)
@@ -115,6 +115,7 @@ struct DeviceView: View {
         direction(cw, symbol: "arrow.clockwise", label: "\(name): clockwise")
       }
     }
+    .contextMenu { DialPresetMenu(model: model, code: press) }
   }
 
   private func direction(_ code: Int, symbol: String, label: String) -> some View {
@@ -152,5 +153,17 @@ struct ControlDropTarget: ViewModifier {
             .allowsHitTesting(false)
         }
       }
+  }
+}
+
+struct DialPresetMenu: View {
+  @ObservedObject var model: Model
+  let code: Int
+
+  var body: some View {
+    Text("Set entire dial")
+    ForEach(DialPreset.allCases, id: \.self) { preset in
+      Button(preset.rawValue) { model.applyDialPreset(preset, to: code) }
+    }
   }
 }

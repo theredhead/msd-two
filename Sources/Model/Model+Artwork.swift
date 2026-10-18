@@ -130,17 +130,12 @@ extension Model {
               guard let key else {
                 throw ActionError.failed("Drop an image, not an application, onto the background")
               }
-              if (1...6).contains(key),
-                let sceneIndex = self.scenes.firstIndex(where: { $0.id == sceneID }),
+              if let sceneIndex = self.scenes.firstIndex(where: { $0.id == sceneID }),
                 let index = self.scenes[sceneIndex].keys.firstIndex(where: { $0.id == key })
               {
                 self.scenes[sceneIndex].keys[index].action = OpenApplicationAction.name
                 self.scenes[sceneIndex].keys[index].argument = url.path
                 self.scenes[sceneIndex].keys[index].imagePath = nil
-              } else if let index = self.bindings.firstIndex(where: { $0.id == key }) {
-                self.bindings[index].action = OpenApplicationAction.name
-                self.bindings[index].argument = url.path
-                self.bindings[index].imagePath = nil
               } else {
                 throw ActionError.failed("The control being edited no longer exists")
               }
@@ -233,10 +228,7 @@ extension Model {
     }
     if search {
       let item = key.flatMap { id -> Binding? in
-        if (1...6).contains(id) {
-          return scenes.first(where: { $0.id == targetSceneID })?.keys.first { $0.id == id }
-        }
-        return bindings.first { $0.id == id }
+        return scenes.first(where: { $0.id == targetSceneID })?.keys.first { $0.id == id }
       }
       let term =
         item.map { ActionCatalog.action(named: $0.action).searchTerm(for: $0) }

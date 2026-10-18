@@ -79,18 +79,13 @@ extension Model {
 
   func handle(_ code: Int) {
     guard recording == nil else { return }
-    let binding: Binding?
-    if (1...6).contains(code) {
-      binding = scenes[activeSceneIndex].keys.first { $0.id == code }
-    } else {
-      binding = bindings.first { $0.id == code }
-    }
+    let binding = scenes[activeSceneIndex].keys.first { $0.id == code }
     guard let binding else {
       message = String(format: "Unmapped event: 0x%02x", code)
       return
     }
     message = "\(binding.name) → \(binding.action)"
     execute(binding)
-    if repairKeyBorders && (1...6).contains(code) { display?.repairBorderAfterKeypress(code) }
+    if (1...6).contains(code) { display?.repairBorderAfterKeypress(code) }
   }
 }

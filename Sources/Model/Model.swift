@@ -2,11 +2,9 @@ import AppKit
 import ApplicationServices
 
 final class Model: ObservableObject, ActionContext {
-  @Published var repairKeyBorders = true
   @Published var connected = false
   @Published var message = "Waiting for device"
   @Published var recording: Int?
-  @Published var bindings: [Binding] = []
   @Published var scenes: [MacroPadScene] = []
   @Published var activeSceneID = UUID()
   @Published var displayBrightness = 80
@@ -42,26 +40,18 @@ final class Model: ObservableObject, ActionContext {
 
   init() {
     let defaults = DefaultConfiguration.bindings()
-    let defaultKeys = defaults.filter { (1...6).contains($0.id) }
-    let defaultControls = defaults.filter { !(1...6).contains($0.id) }
     var needsSave = false
     var migratesShortcuts = false
 
-    bindings = defaultControls
-    scenes = [MacroPadScene(id: UUID(), keys: defaultKeys)]
+    scenes = [MacroPadScene(id: UUID(), keys: defaults)]
     activeSceneID = scenes[0].id
 
     switch ConfigurationFile.load(configURL, decode: LoadedConfiguration.decode) {
     case .missing:
       break
     case .loaded(.current(let saved)):
-      bindings = DefaultConfiguration.merging(saved.bindings, into: defaultControls)
-      let loadedScenes = saved.scenes.map { scene in
-        MacroPadScene(
-          id: scene.id,
-          keys: DefaultConfiguration.merging(scene.keys, into: defaultKeys),
-          backgroundPath: scene.backgroundPath)
-      }
+      needsSave = (saved.version ?? 1) < 3
+      let loadedScenes = saved.migratedScenes()
       if !loadedScenes.isEmpty {
         scenes = loadedScenes
         activeSceneID =
@@ -70,10 +60,7 @@ final class Model: ObservableObject, ActionContext {
       }
       migratesShortcuts = (saved.version ?? 1) < 2
     case .loaded(.legacy(let saved)):
-      bindings = DefaultConfiguration.merging(
-        saved.filter { !(1...6).contains($0.id) }, into: defaultControls)
-      scenes[0].keys = DefaultConfiguration.merging(
-        saved.filter { (1...6).contains($0.id) }, into: defaultKeys)
+      scenes[0].keys = DefaultConfiguration.merging(saved, into: defaults)
       migratesShortcuts = true
       needsSave = true
     case .malformed(let recovery):
@@ -100,9 +87,6 @@ final class Model: ObservableObject, ActionContext {
 
     // Runs once: afterwards the saved version marks unrecorded shortcuts as explicit.
     if migratesShortcuts {
-      for index in bindings.indices {
-        bindings[index].migrateRecordedShortcut()
-      }
       for sceneIndex in scenes.indices {
         for keyIndex in scenes[sceneIndex].keys.indices {
           scenes[sceneIndex].keys[keyIndex].migrateRecordedShortcut()
@@ -122,16 +106,11 @@ final class Model: ObservableObject, ActionContext {
       }
       let modifiers = UInt64(
         event.modifierFlags.intersection([.command, .control, .option, .shift]).rawValue)
-      if (1...6).contains(id),
-        let i = self.scenes[self.activeSceneIndex].keys.firstIndex(where: { $0.id == id })
+      if let i = self.scenes[self.activeSceneIndex].keys.firstIndex(where: { $0.id == id })
       {
         self.scenes[self.activeSceneIndex].keys[i].keyCode = event.keyCode
         self.scenes[self.activeSceneIndex].keys[i].modifiers = modifiers
         self.scenes[self.activeSceneIndex].keys[i].recordedShortcut = self.shortcutLabel(event)
-      } else if let i = self.bindings.firstIndex(where: { $0.id == id }) {
-        self.bindings[i].keyCode = event.keyCode
-        self.bindings[i].modifiers = modifiers
-        self.bindings[i].recordedShortcut = self.shortcutLabel(event)
       } else {
         self.recording = nil
         self.message = "The control being recorded no longer exists"
@@ -160,7 +139,7 @@ final class Model: ObservableObject, ActionContext {
         at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
       if !protectedURLs.contains(configURL) {
         let configuration = SavedConfiguration(
-          version: SavedConfiguration.currentVersion, bindings: bindings, scenes: scenes,
+          version: SavedConfiguration.currentVersion, bindings: [], scenes: scenes,
           activeSceneID: activeSceneID)
         try JSONEncoder().encode(configuration).write(to: configURL, options: .atomic)
       }
@@ -180,10 +159,31 @@ final class Model: ObservableObject, ActionContext {
   }
 
   func addScene() {
-    let keys = (1...6).map { Binding(id: $0, name: "LCD key \($0)") }
+    let keys = DefaultConfiguration.bindings()
     let scene = MacroPadScene(id: UUID(), keys: keys)
     scenes.append(scene)
     activeSceneID = scene.id
+    save()
+  }
+
+  func duplicateActiveScene() {
+    var scene = scenes[activeSceneIndex]
+    scene.id = UUID()
+    scenes.insert(scene, at: activeSceneIndex + 1)
+    activeSceneID = scene.id
+    save()
+  }
+
+  func applyDialPreset(_ preset: DialPreset, to code: Int) {
+    guard let controls = DialPreset.controls(for: code) else { return }
+    recording = nil
+    for (id, action) in zip(controls, preset.actions) {
+      guard let index = scenes[activeSceneIndex].keys.firstIndex(where: { $0.id == id }) else { continue }
+      let old = scenes[activeSceneIndex].keys[index]
+      var binding = Binding(id: id, name: old.name)
+      binding.action = action.name
+      scenes[activeSceneIndex].keys[index] = binding
+    }
     save()
   }
 
