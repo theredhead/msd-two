@@ -26,3 +26,9 @@ The three circular buttons are arranged left, middle, and right below the screen
 Screen controls: user tested all six areas; each toggles the entire display off/on. No vendor reports observed during these tests. Individual screen control mapping is unresolved; no conclusion yet about initialization or operating mode.
 
 Raw data: `session-01.log`. Capture source: `../tools/capture.swift`. Capture sends no output reports.
+
+## LCD breakthrough
+
+After uploading and committing a key image, key 1 produced two discrete reports with code `01` at byte 9 (see `lcd-image.log`). Uploading images is associated with normal key reporting; the exact minimum enabling sequence has not been isolated. App now initializes DIS/LIG, uploads six numbered JPEGs, commits each with STP, and sends CONNECT every five seconds. Key codes 2–6 come from exact-device open-source references and still need individual hardware verification.
+
+The initial probe used NSImage TIFF rendering, which may yield Retina-sized pixels. The app now renders explicit 60×60-pixel bitmaps. Physical placement still needs confirmation.
