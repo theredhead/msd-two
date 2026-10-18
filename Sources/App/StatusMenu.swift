@@ -21,6 +21,9 @@ extension AppDelegate: NSMenuDelegate {
       launchAtLoginItem = item
     }
     menu.addItem(.separator())
+    menu.addItem(
+      withTitle: "About MacroPad…", action: #selector(showAbout), keyEquivalent: ""
+    ).target = self
     menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q").target = self
     status.menu = menu
   }
@@ -80,6 +83,11 @@ extension AppDelegate: NSMenuDelegate {
         alert.runModal()
       }
     }
+  }
+
+  @objc func showAbout() {
+    NSApp.activate(ignoringOtherApps: true)
+    NSApp.orderFrontStandardAboutPanel(nil)
   }
 
   @objc func quit() { NSApp.terminate(nil) }

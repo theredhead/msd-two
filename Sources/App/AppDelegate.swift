@@ -15,6 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     let applicationItem = NSMenuItem()
     let applicationMenu = NSMenu()
     applicationMenu.addItem(
+      withTitle: "About MacroPad…", action: #selector(showAbout), keyEquivalent: ""
+    ).target = self
+    applicationMenu.addItem(.separator())
+    applicationMenu.addItem(
       withTitle: "Quit MacroPad", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
     )
     applicationItem.submenu = applicationMenu
@@ -46,6 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     toolbar.allowsUserCustomization = false
     window.toolbar = toolbar
     window.toolbarStyle = .unified
+    // Keep this accessory app's window available when Finder becomes active for a drop.
+    window.hidesOnDeactivate = false
     window.isReleasedWhenClosed = false
     window.contentView = NSHostingView(rootView: SettingsView(model: model))
     window.contentMinSize = NSSize(width: 860, height: 650)

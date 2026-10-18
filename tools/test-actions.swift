@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Records what actions ask of the app without touching real devices or settings.
 final class FakeContext: ActionContext {
@@ -73,7 +74,7 @@ struct ActionChecks {
         ["MSD-TWO brightness up", "MSD-TWO brightness down", "Toggle MSD-TWO adaptive brightness"]
       ),
       ("Scenes", ["Next scene", "Previous scene"]),
-      ("Keyboard & Automation", ["Keystroke", "Open application", "AppleScript", "Shell script"]),
+      ("Keyboard & Automation", ["Keystroke", "Open application", "Open folder", "AppleScript", "Shell script"]),
     ]
     precondition(ActionCatalog.groups.map(\.name) == expected.map(\.0))
     for (group, names) in zip(ActionCatalog.groups, expected) {
@@ -105,6 +106,48 @@ struct ActionChecks {
     print("PASS presentation: symbol icons, application icon, artwork keys, search terms")
 
     let context = FakeContext()
+    let folder = OpenFolderAction()
+    let folderRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try! FileManager.default.createDirectory(at: folderRoot, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folderRoot) }
+    binding.action = folder.name
+    binding.argument = folderRoot.path
+    precondition(folder.isReady(binding))
+    precondition(folder.icon(for: binding) != nil)
+    let savedFolder = try! JSONDecoder().decode(Binding.self, from: JSONEncoder().encode(binding))
+    precondition(savedFolder.action == folder.name && savedFolder.argument == folderRoot.path)
+    binding.argument = folderRoot.appendingPathComponent("missing").path
+    precondition(!folder.isReady(binding))
+    folder.perform(binding, in: context)
+    precondition(context.reports.last == "Choose an existing folder for LCD key 1 first")
+    let file = folderRoot.appendingPathComponent("file.txt")
+    try! Data().write(to: file)
+    binding.argument = file.path
+    precondition(!folder.isReady(binding))
+    binding.argument = ""
+    precondition(!folder.isReady(binding))
+    print("PASS folders: directory validation, file rejection, icon, persistence, missing-folder reporting")
+
+    // Safari in /Applications is a symlink, so classify its destination, not public.symlink.
+    let appURL = URL(fileURLWithPath: "/System/Applications/Calculator.app")
+    let linkURL = folderRoot.appendingPathComponent("Linked Calculator.app")
+    try! FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: appURL)
+    let aliasURL = folderRoot.appendingPathComponent("Calculator alias")
+    let aliasData = try! appURL.bookmarkData(options: .suitableForBookmarkFile,
+      includingResourceValuesForKeys: nil, relativeTo: nil)
+    try! URL.writeBookmarkData(aliasData, to: aliasURL)
+    for source in [appURL, linkURL, aliasURL] {
+      let resolved = try! DroppedFile.resolvedURL(source)
+      precondition(resolved == appURL.resolvingSymlinksInPath())
+      precondition(try! resolved.resourceValues(forKeys: [.contentTypeKey]).contentType!
+        .conforms(to: .applicationBundle))
+      binding.imagePath = "/old-custom-icon.png"
+      let dropped = DroppedFile.applicationBinding(binding, url: resolved)
+      precondition(dropped.action == OpenApplicationAction.name)
+      precondition(dropped.argument == resolved.path && dropped.imagePath == nil)
+      precondition(dropped.id == binding.id && dropped.name == binding.name)
+    }
+    print("PASS app drops: direct bundles, symbolic links, Finder aliases, action and automatic icon")
     let keystroke = KeystrokeAction()
     binding.argument = ""
     precondition(!keystroke.isReady(binding))

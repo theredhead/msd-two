@@ -151,6 +151,7 @@ struct ControlDropTarget: ViewModifier {
         if isTargeted {
           RoundedRectangle(cornerRadius: 7).stroke(Color.accentColor, lineWidth: 2)
             .allowsHitTesting(false)
+            .allowsHitTesting(false)
         }
       }
   }

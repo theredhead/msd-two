@@ -128,7 +128,7 @@ enum ActionCatalog {
     ActionGroup(
       name: "Keyboard & Automation",
       actions: [
-        KeystrokeAction(), OpenApplicationAction(), AppleScriptAction(), ShellScriptAction(),
+        KeystrokeAction(), OpenApplicationAction(), OpenFolderAction(), AppleScriptAction(), ShellScriptAction(),
       ]),
   ]
 

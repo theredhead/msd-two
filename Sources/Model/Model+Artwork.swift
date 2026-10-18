@@ -125,6 +125,7 @@ extension Model {
           let accessed = url.startAccessingSecurityScopedResource()
           defer { if accessed { url.stopAccessingSecurityScopedResource() } }
           do {
+            let url = try DroppedFile.resolvedURL(url)
             let type = try url.resourceValues(forKeys: [.contentTypeKey]).contentType
             if type?.conforms(to: .applicationBundle) == true {
               guard let key else {
@@ -133,9 +134,8 @@ extension Model {
               if let sceneIndex = self.scenes.firstIndex(where: { $0.id == sceneID }),
                 let index = self.scenes[sceneIndex].keys.firstIndex(where: { $0.id == key })
               {
-                self.scenes[sceneIndex].keys[index].action = OpenApplicationAction.name
-                self.scenes[sceneIndex].keys[index].argument = url.path
-                self.scenes[sceneIndex].keys[index].imagePath = nil
+                self.scenes[sceneIndex].keys[index] = DroppedFile.applicationBinding(
+                  self.scenes[sceneIndex].keys[index], url: url)
               } else {
                 throw ActionError.failed("The control being edited no longer exists")
               }

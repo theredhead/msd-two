@@ -3,6 +3,8 @@ set -eu
 cd "$(dirname "$0")/.."
 APP="$PWD/.build/MacroPad.app"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
+cp Assets/MacroPadIcon.icns "$APP/Contents/Resources/MacroPadIcon.icns"
 swiftc -module-cache-path .build/module-cache Sources/**/*.swift -o "$APP/Contents/MacOS/MacroPad" -framework AppKit -framework SwiftUI -framework IOKit -framework CoreAudio -framework ApplicationServices -framework WebKit
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -11,6 +13,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>MacroPad</string>
 <key>CFBundleIdentifier</key><string>nl.theredhead.msd-two</string>
 <key>CFBundleName</key><string>MacroPad</string>
+<key>CFBundleIconFile</key><string>MacroPadIcon</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSUIElement</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Run AppleScript actions configured for your macro pad.</string>
